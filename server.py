@@ -2,21 +2,20 @@ from fastapi import FastAPI, Request, HTTPException
 import uvicorn
 import logging
 import json
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, field_validator
 from typing import List, Dict, Any, Optional, Union, Literal
-import httpx
 import os
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 import litellm
 import uuid
 import time
 from dotenv import load_dotenv
-import re
-from datetime import datetime
 import sys
 
 # Load environment variables from .env file
 load_dotenv()
+
+# litellm._turn_on_debug()
 
 # Configure logging
 logging.basicConfig(
@@ -25,8 +24,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configure uvicorn to be quieter
-import uvicorn
 # Tell uvicorn's loggers to be quiet
 logging.getLogger("uvicorn").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
@@ -103,7 +100,9 @@ OPENAI_MODELS = [
     "gpt-4o-mini",
     "gpt-4o-mini-audio-preview",
     "gpt-4.1",  # Added default big model
-    "gpt-4.1-mini" # Added default small model
+    "gpt-4.1-mini", # Added default small model
+    "gpt-5",
+    "gpt-5-mini",
 ]
 
 # List of Gemini models
@@ -153,7 +152,7 @@ class ContentBlockToolUse(BaseModel):
 class ContentBlockToolResult(BaseModel):
     type: Literal["tool_result"]
     tool_use_id: str
-    content: Union[str, List[Dict[str, Any]], Dict[str, Any], List[Any], Any]
+    content: Any  # Simplified to Any to handle various content formats
 
 class SystemContent(BaseModel):
     type: Literal["text"]
@@ -333,7 +332,7 @@ class MessagesResponse(BaseModel):
     id: str
     model: str
     role: Literal["assistant"] = "assistant"
-    content: List[Union[ContentBlockText, ContentBlockToolUse]]
+    content: List[Dict[str, Any]]  # Simplified to handle various content block formats
     type: Literal["message"] = "message"
     stop_reason: Optional[Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"]] = None
     stop_sequence: Optional[str] = None
@@ -376,12 +375,12 @@ def parse_tool_result_content(content):
                 else:
                     try:
                         result += json.dumps(item) + "\n"
-                    except:
+                    except (TypeError, ValueError):
                         result += str(item) + "\n"
             else:
                 try:
                     result += str(item) + "\n"
-                except:
+                except Exception:
                     result += "Unparseable content\n"
         return result.strip()
         
@@ -390,14 +389,14 @@ def parse_tool_result_content(content):
             return content.get("text", "")
         try:
             return json.dumps(content)
-        except:
+        except (TypeError, ValueError):
             return str(content)
             
     # Fallback for any other type
     try:
         return str(content)
-    except:
-        return "Unparseable content"
+    except Exception:
+        return "Unparsable content"
 
 def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str, Any]:
     """Convert Anthropic API request format to LiteLLM format (which follows OpenAI)."""
@@ -465,7 +464,7 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                                             else:
                                                 try:
                                                     result_content += json.dumps(content_block) + "\n"
-                                                except:
+                                                except (TypeError, ValueError):
                                                     result_content += str(content_block) + "\n"
                                 elif isinstance(block.content, dict):
                                     # Handle dictionary content
@@ -474,13 +473,13 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                                     else:
                                         try:
                                             result_content = json.dumps(block.content)
-                                        except:
+                                        except (TypeError, ValueError):
                                             result_content = str(block.content)
                                 else:
                                     # Handle any other type by converting to string
                                     try:
                                         result_content = str(block.content)
-                                    except:
+                                    except Exception:
                                         result_content = "Unparseable content"
                             
                             # In OpenAI format, tool results come from the user (rather than being content blocks)
@@ -516,16 +515,16 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                             if hasattr(block, "content"):
                                 if isinstance(block.content, str):
                                     # If it's a simple string, create a text block for it
-                                    processed_content_block["content"] = [{"type": "text", "text": block.content}]
+                                    processed_content_block["content"] = str(block.content)
                                 elif isinstance(block.content, list):
-                                    # If it's already a list of blocks, keep it
-                                    processed_content_block["content"] = block.content
+                                    # If it's already a list of blocks, convert to string representation
+                                    processed_content_block["content"] = json.dumps(block.content)
                                 else:
                                     # Default fallback
-                                    processed_content_block["content"] = [{"type": "text", "text": str(block.content)}]
+                                    processed_content_block["content"] = str(block.content)
                             else:
                                 # Default empty content
-                                processed_content_block["content"] = [{"type": "text", "text": ""}]
+                                processed_content_block["content"] = ""
                                 
                             processed_content.append(processed_content_block)
                 
@@ -541,10 +540,19 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     litellm_request = {
         "model": anthropic_request.model,  # t understands "anthropic/claude-x" format
         "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": anthropic_request.temperature,
         "stream": anthropic_request.stream,
     }
+    
+    # Skip temperature parameter to avoid compatibility issues with newer models
+    
+    # For OpenAI models, always use max_completion_tokens 
+    # This is more compatible with newer OpenAI models and avoids parameter errors
+    if anthropic_request.model.startswith("openai/"):
+        # model_name = anthropic_request.model.split("/", 1)[1]
+        litellm_request["max_completion_tokens"] = max_tokens
+    else:
+        # For non-OpenAI models, use max_tokens
+        litellm_request["max_tokens"] = max_tokens
     
     # Add optional parameters if present
     if anthropic_request.stop_sequences:
@@ -594,7 +602,7 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     
     # Convert tool_choice to OpenAI format if present
     if anthropic_request.tool_choice:
-        if hasattr(anthropic_request.tool_choice, 'dict'):
+        if hasattr(anthropic_request.tool_choice, 'dict') and callable(getattr(anthropic_request.tool_choice, 'dict', None)):
             tool_choice_dict = anthropic_request.tool_choice.dict()
         else:
             tool_choice_dict = anthropic_request.tool_choice
@@ -635,12 +643,12 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
         # Handle ModelResponse object from LiteLLM
         if hasattr(litellm_response, 'choices') and hasattr(litellm_response, 'usage'):
             # Extract data from ModelResponse object directly
-            choices = litellm_response.choices
+            choices = getattr(litellm_response, 'choices', [])
             message = choices[0].message if choices and len(choices) > 0 else None
             content_text = message.content if message and hasattr(message, 'content') else ""
             tool_calls = message.tool_calls if message and hasattr(message, 'tool_calls') else None
             finish_reason = choices[0].finish_reason if choices and len(choices) > 0 else "stop"
-            usage_info = litellm_response.usage
+            usage_info = getattr(litellm_response, 'usage', {})
             response_id = getattr(litellm_response, 'id', f"msg_{uuid.uuid4()}")
         else:
             # For backward compatibility - handle dict responses
@@ -650,7 +658,10 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
             except AttributeError:
                 # If .dict() fails, try to use model_dump or __dict__ 
                 try:
-                    response_dict = litellm_response.model_dump() if hasattr(litellm_response, 'model_dump') else litellm_response.__dict__
+                    if hasattr(litellm_response, 'model_dump') and callable(getattr(litellm_response, 'model_dump', None)):
+                        response_dict = litellm_response.model_dump()
+                    else:
+                        response_dict = litellm_response.__dict__
                 except AttributeError:
                     # Fallback - manually extract attributes
                     response_dict = {
@@ -885,7 +896,7 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                     
                     # Handle different formats of delta content
                     if hasattr(delta, 'content'):
-                        delta_content = delta.content
+                        delta_content = getattr(delta, 'content', None)
                     elif isinstance(delta, dict) and 'content' in delta:
                         delta_content = delta['content']
                     
@@ -903,7 +914,7 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                     
                     # Handle different formats of tool calls
                     if hasattr(delta, 'tool_calls'):
-                        delta_tool_calls = delta.tool_calls
+                        delta_tool_calls = getattr(delta, 'tool_calls', None)
                     elif isinstance(delta, dict) and 'tool_calls' in delta:
                         delta_tool_calls = delta['tool_calls']
                     
@@ -939,7 +950,7 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                             if isinstance(tool_call, dict) and 'index' in tool_call:
                                 current_index = tool_call['index']
                             elif hasattr(tool_call, 'index'):
-                                current_index = tool_call.index
+                                current_index = getattr(tool_call, 'index', 0)
                             else:
                                 current_index = 0
                             
@@ -1148,14 +1159,14 @@ async def create_message(
                                         try:
                                             item_text = item.get("text", json.dumps(item))
                                             all_text += item_text + "\n"
-                                        except:
+                                        except (TypeError, ValueError):
                                             all_text += str(item) + "\n"
                             elif isinstance(result_content, str):
                                 all_text += result_content + "\n"
                             else:
                                 try:
                                     all_text += json.dumps(result_content) + "\n"
-                                except:
+                                except (TypeError, ValueError):
                                     all_text += str(result_content) + "\n"
                         
                         # Replace the list with extracted text
@@ -1332,6 +1343,11 @@ async def create_message(
         
         # Return detailed error
         status_code = error_details.get('status_code', 500)
+        if isinstance(status_code, str):
+            try:
+                status_code = int(status_code)
+            except ValueError:
+                status_code = 500
         raise HTTPException(status_code=status_code, detail=error_message)
 
 @app.post("/v1/messages/count_tokens")
@@ -1371,7 +1387,10 @@ async def count_tokens(
         # Use LiteLLM's token_counter function
         try:
             # Import token_counter function
-            from litellm import token_counter
+            try:
+                from litellm import token_counter
+            except ImportError:
+                from litellm.utils import token_counter
             
             # Log the request beautifully
             num_tools = len(request.tools) if request.tools else 0
