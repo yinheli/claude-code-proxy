@@ -53,6 +53,30 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
    ```
    *(`--reload` is optional, for development)*
 
+## Docker 🐳
+
+Pull image
+```bash
+docker pull yinheli/claude-code-proxy:latest
+```
+
+Run (OpenAI only)
+```bash
+docker run --rm -p 8082:8082 \
+  -e OPENAI_API_BASE=http://xxx/v1 \
+  -e OPENAI_API_KEY=sk-... \
+  yinheli/claude-code-proxy:latest
+```
+
+Run (prefer Google)
+```bash
+docker run --rm -p 8082:8082 \
+  -e GEMINI_API_KEY=google-... \
+  -e OPENAI_API_KEY=sk-... \
+  -e PREFERRED_PROVIDER=google \
+  yinheli/claude-code-proxy:latest
+```
+
 ### Using with Claude Code 🎮
 
 1. **Install Claude Code** (if you haven't already):
